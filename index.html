@@ -269,6 +269,19 @@
         .install-btn:hover { opacity: 0.85; transform: translateY(-2px); box-shadow: 0 5px 15px var(--accent-glow); }
         .update-date { font-size: 10px; color: var(--text-muted); }
 
+        /* Admin action buttons on update cards */
+        .update-admin-actions {
+            display: flex; gap: 8px; margin-top: 10px;
+        }
+        .update-admin-btn {
+            flex: 1; padding: 7px; border-radius: 8px; border: none;
+            font-size: 12px; font-weight: bold; cursor: pointer; transition: 0.2s;
+        }
+        .update-admin-btn.edit { background: rgba(255,170,0,0.15); color: var(--warning); border: 1px solid rgba(255,170,0,0.3); }
+        .update-admin-btn.edit:hover { background: rgba(255,170,0,0.3); }
+        .update-admin-btn.del { background: rgba(255,0,85,0.12); color: var(--danger); border: 1px solid rgba(255,0,85,0.25); }
+        .update-admin-btn.del:hover { background: rgba(255,0,85,0.28); }
+
         /* MODAL */
         .modal-overlay {
             position: fixed; inset: 0; background: rgba(0,0,0,0.85);
@@ -641,6 +654,7 @@
 <!-- ADMIN PANEL -->
 <div id="admin-panel">
     <div class="admin-box">
+        <!-- Step 1: Password -->
         <div class="admin-step active" id="admin-step-1">
             <div class="admin-title"><i class="fas fa-lock"></i> Panel de Administración</div>
             <div class="admin-subtitle">Acceso restringido. Introduce la contraseña para continuar.</div>
@@ -655,8 +669,9 @@
             <button class="admin-cancel" onclick="adminPanel.close()">Cancelar</button>
         </div>
 
+        <!-- Step 2: Form (create / edit) -->
         <div class="admin-step" id="admin-step-2">
-            <div class="admin-title"><i class="fas fa-plus-circle"></i> Nueva Actualización</div>
+            <div class="admin-title" id="admin-form-title"><i class="fas fa-plus-circle"></i> Nueva Actualización</div>
             <div class="admin-subtitle">Completa los campos y publica la actualización para todos los usuarios.</div>
             <label class="admin-label">Título de la actualización *</label>
             <input type="text" class="admin-input" id="admin-update-title" placeholder="Ej: v3.0 - Mejoras de rendimiento">
@@ -666,7 +681,7 @@
             <textarea class="admin-input code-input" id="admin-update-code" placeholder="// Escribe aquí el código JS que se ejecutará al instalar esta actualización
 // Ej: document.documentElement.style.setProperty('--accent', '#ff6600');" rows="5"></textarea>
             <div style="color:var(--danger);font-size:12px;min-height:18px;margin-bottom:6px;" id="admin-form-error"></div>
-            <button class="admin-submit" onclick="adminPanel.publishUpdate()"><i class="fas fa-rocket"></i> Publicar actualización</button>
+            <button class="admin-submit" id="admin-submit-btn" onclick="adminPanel.publishUpdate()"><i class="fas fa-rocket"></i> Publicar actualización</button>
             <button class="admin-cancel" onclick="adminPanel.close()">Cancelar</button>
         </div>
     </div>
@@ -675,7 +690,7 @@
 <!-- FIREBASE SDK -->
 <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-    import { getDatabase, ref, push, onValue, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+    import { getDatabase, ref, push, onValue, set, remove, update } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
 
     const firebaseConfig = {
         apiKey: "AIzaSyD13N4-9MjTrmlPwGP7mves0Exje4v2ACw",
@@ -695,28 +710,94 @@
     window._fbRef = ref;
     window._fbPush = push;
     window._fbOnValue = onValue;
-    window._fbServerTimestamp = serverTimestamp;
+    window._fbSet = set;
+    window._fbRemove = remove;
+    window._fbUpdate = update;
     window._fbReady = true;
 
     window.dispatchEvent(new Event('firebaseReady'));
 </script>
 
 <script>
+    /* ======================================================
+       DEVICE ID — Identificador único permanente del dispositivo.
+       Se guarda en IndexedDB para sobrevivir borrados de caché/localStorage.
+       ====================================================== */
+    const deviceStore = {
+        _id: null,
+        _DB_NAME: 'AlexBrowserDB',
+        _STORE: 'meta',
+
+        _openDB() {
+            return new Promise((resolve, reject) => {
+                const req = indexedDB.open(deviceStore._DB_NAME, 1);
+                req.onupgradeneeded = e => e.target.result.createObjectStore(deviceStore._STORE);
+                req.onsuccess = e => resolve(e.target.result);
+                req.onerror = reject;
+            });
+        },
+
+        async get(key) {
+            const db = await this._openDB();
+            return new Promise((resolve, reject) => {
+                const tx = db.transaction(this._STORE, 'readonly');
+                const req = tx.objectStore(this._STORE).get(key);
+                req.onsuccess = e => resolve(e.target.result);
+                req.onerror = reject;
+            });
+        },
+
+        async set(key, value) {
+            const db = await this._openDB();
+            return new Promise((resolve, reject) => {
+                const tx = db.transaction(this._STORE, 'readwrite');
+                tx.objectStore(this._STORE).put(value, key);
+                tx.oncomplete = resolve;
+                tx.onerror = reject;
+            });
+        },
+
+        async getOrCreateId() {
+            let id = await this.get('deviceId');
+            if (!id) {
+                id = 'dev_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+                await this.set('deviceId', id);
+            }
+            this._id = id;
+            return id;
+        },
+
+        /* Lista de IDs de actualizaciones ya instaladas — en IndexedDB */
+        async getApplied() {
+            const raw = await this.get('appliedUpdates');
+            return raw ? JSON.parse(raw) : [];
+        },
+
+        async addApplied(updateId) {
+            const list = await this.getApplied();
+            if (!list.includes(updateId)) {
+                list.push(updateId);
+                await this.set('appliedUpdates', JSON.stringify(list));
+            }
+        }
+    };
+
     /* ======== DATA MANAGER ======== */
     const dataManager = {
         saveHistory: (url, title) => {
-            if(!url || url === 'about:start' || url.includes('corsproxy.io')) return;
+            if (!url || url === 'about:start' || url.includes('corsproxy.io')) return;
             let history = JSON.parse(localStorage.getItem('ab_history') || '[]');
             history.unshift({ url, title, time: new Date().toLocaleTimeString() });
-            if(history.length > 100) history.pop();
+            if (history.length > 100) history.pop();
             localStorage.setItem('ab_history', JSON.stringify(history));
             ui.renderHistory();
         },
         getHistory: () => JSON.parse(localStorage.getItem('ab_history') || '[]'),
         clearAll: () => {
-            localStorage.clear();
-            ui.showToast("Historial y caché eliminados. Reiniciando...");
-            setTimeout(() => location.reload(), 1500);
+            // Solo borra historial/caché, NO las actualizaciones instaladas (están en IndexedDB)
+            localStorage.removeItem('ab_history');
+            ui.showToast("Historial eliminado. Las actualizaciones instaladas se conservan ✅");
+            ui.renderHistory();
         }
     };
 
@@ -733,7 +814,7 @@
         init() {
             this.newTab();
             document.getElementById('url-input').addEventListener('keypress', (e) => {
-                if(e.key === 'Enter') this.navigate();
+                if (e.key === 'Enter') this.navigate();
             });
             ui.renderHistory();
         }
@@ -752,16 +833,16 @@
             document.getElementById('viewport').appendChild(iframe);
 
             this.switchTab(tabId);
-            if(url !== this.homeUrl) this.navigate(url);
+            if (url !== this.homeUrl) this.navigate(url);
             ui.closePanels();
         }
 
         closeTab(e, id) {
             e.stopPropagation();
-            if(this.tabs.length === 1) return;
+            if (this.tabs.length === 1) return;
             this.tabs = this.tabs.filter(t => t.id !== id);
             document.getElementById(`view-${id}`).remove();
-            if(this.activeTabId === id) this.switchTab(this.tabs[this.tabs.length - 1].id);
+            if (this.activeTabId === id) this.switchTab(this.tabs[this.tabs.length - 1].id);
             else this.renderTabs();
         }
 
@@ -772,7 +853,7 @@
 
             const currentTab = this.tabs.find(t => t.id === id);
 
-            if(currentTab.url === 'about:start') {
+            if (currentTab.url === 'about:start') {
                 document.getElementById('start-page').classList.add('active');
                 document.getElementById('url-input').value = "";
                 document.getElementById('security-icon').className = "fas fa-shield-halved site-info-icon";
@@ -780,8 +861,8 @@
             } else {
                 document.getElementById(`view-${id}`).classList.add('active');
                 let cleanUrl = currentTab.url;
-                if(cleanUrl.includes('corsproxy.io/?')) cleanUrl = decodeURIComponent(cleanUrl.split('corsproxy.io/?')[1]);
-                if(cleanUrl.includes('google.com/search?igu=1&q=')) cleanUrl = "Búsqueda: " + decodeURIComponent(cleanUrl.split('q=')[1].split('&')[0]);
+                if (cleanUrl.includes('corsproxy.io/?')) cleanUrl = decodeURIComponent(cleanUrl.split('corsproxy.io/?')[1]);
+                if (cleanUrl.includes('google.com/search?igu=1&q=')) cleanUrl = "Búsqueda: " + decodeURIComponent(cleanUrl.split('q=')[1].split('&')[0]);
                 document.getElementById('url-input').value = cleanUrl;
                 document.getElementById('security-icon').className = "fas fa-lock site-info-icon";
                 document.getElementById('security-icon').style.color = "var(--success)";
@@ -793,7 +874,7 @@
 
         navigate(inputVal = null) {
             let query = inputVal || document.getElementById('url-input').value.trim();
-            if(!query) return;
+            if (!query) return;
 
             const proxyEnabled = document.getElementById('proxy-toggle').classList.contains('active');
             const currentTab = this.tabs.find(t => t.id === this.activeTabId);
@@ -801,13 +882,13 @@
 
             const isUrl = query.includes('.') && !query.includes(' ');
 
-            if(isUrl) {
+            if (isUrl) {
                 let cleanUrl = query.startsWith('http') ? query : 'https://' + query;
                 title = query;
-                if(cleanUrl.includes('youtube.com/watch?v=')) {
+                if (cleanUrl.includes('youtube.com/watch?v=')) {
                     finalUrl = cleanUrl.replace('watch?v=', 'embed/');
                     ui.showToast("Optimizando vídeo de YouTube...");
-                } else if(proxyEnabled) {
+                } else if (proxyEnabled) {
                     finalUrl = `https://corsproxy.io/?${encodeURIComponent(cleanUrl)}`;
                     ui.showToast("Bypass de seguridad activado 🛡️");
                 } else {
@@ -827,9 +908,9 @@
 
         quickSearch(type) {
             let query = this.lastSearchQuery || document.getElementById('url-input').value.trim();
-            if(!query || query.includes('http')) { ui.showToast("Escribe algo para buscar primero"); return; }
+            if (!query || query.includes('http')) { ui.showToast("Escribe algo para buscar primero"); return; }
             let finalUrl = "", title = "";
-            switch(type) {
+            switch (type) {
                 case 'images': finalUrl = `https://www.google.com/search?igu=1&tbm=isch&q=${encodeURIComponent(query)}`; title = `Imágenes: ${query}`; break;
                 case 'videos': finalUrl = `https://www.google.com/search?igu=1&tbm=vid&q=${encodeURIComponent(query)}`; title = `Videos: ${query}`; break;
                 case 'news': finalUrl = `https://www.google.com/search?igu=1&tbm=nws&q=${encodeURIComponent(query)}`; title = `Noticias: ${query}`; break;
@@ -862,16 +943,16 @@
             this.updateNavButtons();
 
             let saveUrl = url;
-            if(url.includes('corsproxy.io/?')) saveUrl = decodeURIComponent(url.split('corsproxy.io/?')[1]);
+            if (url.includes('corsproxy.io/?')) saveUrl = decodeURIComponent(url.split('corsproxy.io/?')[1]);
             dataManager.saveHistory(saveUrl, title);
         }
 
         goBack() {
             const tab = this.tabs.find(t => t.id === this.activeTabId);
-            if(tab && tab.historyIndex > 0) {
+            if (tab && tab.historyIndex > 0) {
                 tab.historyIndex--;
                 const prevUrl = tab.history[tab.historyIndex];
-                if(prevUrl === 'about:start') this.switchTab(tab.id);
+                if (prevUrl === 'about:start') this.switchTab(tab.id);
                 else {
                     document.getElementById(`view-${this.activeTabId}`).src = prevUrl;
                     tab.url = prevUrl;
@@ -882,7 +963,7 @@
 
         goForward() {
             const tab = this.tabs.find(t => t.id === this.activeTabId);
-            if(tab && tab.historyIndex < tab.history.length - 1) {
+            if (tab && tab.historyIndex < tab.history.length - 1) {
                 tab.historyIndex++;
                 const nextUrl = tab.history[tab.historyIndex];
                 document.getElementById(`view-${this.activeTabId}`).src = nextUrl;
@@ -893,7 +974,7 @@
 
         reload() {
             const frame = document.getElementById(`view-${this.activeTabId}`);
-            if(frame.src) frame.src = frame.src;
+            if (frame.src) frame.src = frame.src;
             ui.showToast("Recargando página...");
         }
 
@@ -919,9 +1000,9 @@
                 el.className = `tab ${tab.id === this.activeTabId ? 'active' : ''}`;
                 el.onclick = () => this.switchTab(tab.id);
                 let icon = '<i class="fas fa-globe"></i>';
-                if(tab.url.includes('google.com')) icon = '<i class="fab fa-google" style="color:var(--accent)"></i>';
-                if(tab.url.includes('youtube.com')) icon = '<i class="fab fa-youtube" style="color:var(--danger)"></i>';
-                if(tab.url === 'about:start') icon = '<i class="fas fa-house"></i>';
+                if (tab.url.includes('google.com')) icon = '<i class="fab fa-google" style="color:var(--accent)"></i>';
+                if (tab.url.includes('youtube.com')) icon = '<i class="fab fa-youtube" style="color:var(--danger)"></i>';
+                if (tab.url === 'about:start') icon = '<i class="fas fa-house"></i>';
                 el.innerHTML = `${icon}<span style="max-width:120px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;">${tab.title}</span><div class="tab-close" onclick="browser.closeTab(event,${tab.id})">×</div>`;
                 container.appendChild(el);
             });
@@ -941,9 +1022,9 @@
             const panel = document.getElementById(`panel-${id}`);
             const isOpen = panel.classList.contains('open');
             ui.closePanels();
-            if(!isOpen) {
+            if (!isOpen) {
                 panel.classList.add('open');
-                if(id === 'history') ui.renderHistory();
+                if (id === 'history') ui.renderHistory();
             }
         },
 
@@ -952,13 +1033,13 @@
         renderHistory: () => {
             const list = dataManager.getHistory();
             const container = document.getElementById('history-list');
-            if(!list.length) {
+            if (!list.length) {
                 container.innerHTML = '<div style="text-align:center;color:#777;margin-top:50px;"><i class="fas fa-folder-open" style="font-size:40px;margin-bottom:15px;display:block;"></i>No hay historial</div>';
                 return;
             }
             container.innerHTML = list.map(item => {
-                let displayUrl = item.url.length > 40 ? item.url.substring(0,40)+"..." : item.url;
-                let safeUrl = item.url.replace(/'/g,"\\'").replace(/"/g,"&quot;");
+                let displayUrl = item.url.length > 40 ? item.url.substring(0, 40) + "..." : item.url;
+                let safeUrl = item.url.replace(/'/g, "\\'").replace(/"/g, "&quot;");
                 return `<div class="history-item" onclick="document.getElementById('url-input').value='${safeUrl}';browser.navigate();ui.closePanels()">
                     <i class="fas fa-link" style="color:var(--accent);"></i>
                     <div style="flex:1;overflow:hidden;">
@@ -1003,10 +1084,10 @@
         },
 
         changeTheme: (theme) => {
-            if(theme === 'blue') {
+            if (theme === 'blue') {
                 document.documentElement.style.setProperty('--accent', '#4da6ff');
                 document.documentElement.style.setProperty('--accent-secondary', '#0055ff');
-            } else if(theme === 'purple') {
+            } else if (theme === 'purple') {
                 document.documentElement.style.setProperty('--accent', '#cc66ff');
                 document.documentElement.style.setProperty('--accent-secondary', '#8800cc');
             } else {
@@ -1019,26 +1100,45 @@
 
     /* ======== UPDATES MANAGER ======== */
     const updatesManager = {
-        applied: JSON.parse(localStorage.getItem('ab_applied_updates') || '[]'),
+        _cache: {},
+        _applied: [],          // Se carga desde IndexedDB al inicio
+        _adminUnlocked: false, // Solo true tras autenticarse en el admin panel
 
-        render: (updates) => {
+        /* Carga la lista de instaladas desde IndexedDB */
+        async loadApplied() {
+            this._applied = await deviceStore.getApplied();
+        },
+
+        isApplied(id) {
+            return this._applied.includes(id);
+        },
+
+        async render(updates) {
             const container = document.getElementById('updates-list');
-            if(!updates || updates.length === 0) {
+            if (!updates || updates.length === 0) {
                 container.innerHTML = `<div style="text-align:center;color:var(--text-muted);padding-top:50px;"><i class="fas fa-check-circle" style="font-size:40px;color:var(--success);margin-bottom:15px;display:block;"></i><p>Todo está actualizado</p></div>`;
                 document.getElementById('update-badge').style.display = 'none';
                 return;
             }
 
-            updates.sort((a,b) => (b.timestamp||0) - (a.timestamp||0));
+            updates.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
 
             let pendingCount = 0;
-            container.innerHTML = updates.map(u => {
-                const isApplied = updatesManager.applied.includes(u.id);
-                if(!isApplied) pendingCount++;
-                const dateStr = u.timestamp ? new Date(u.timestamp).toLocaleDateString('es-ES', {day:'2-digit',month:'short',year:'numeric'}) : '';
-                const safeCode = (u.code||'').replace(/\\/g,'\\\\').replace(/`/g,'\\`').replace(/\$/g,'\\$');
-                const safeTitle = (u.title||'').replace(/'/g,"\\'");
-                return `<div class="update-card">
+            const cards = [];
+
+            for (const u of updates) {
+                const isApplied = this.isApplied(u.id);
+                if (!isApplied) pendingCount++;
+                const dateStr = u.timestamp ? new Date(u.timestamp).toLocaleDateString('es-ES', { day: '2-digit', month: 'short', year: 'numeric' }) : '';
+
+                const adminActions = this._adminUnlocked
+                    ? `<div class="update-admin-actions">
+                            <button class="update-admin-btn edit" onclick="adminPanel.editUpdate('${u.id}')"><i class="fas fa-pen"></i> Editar</button>
+                            <button class="update-admin-btn del" onclick="updatesManager.deleteUpdate('${u.id}', '${(u.title || '').replace(/'/g, "\\'")}')"><i class="fas fa-trash"></i> Eliminar</button>
+                       </div>`
+                    : '';
+
+                cards.push(`<div class="update-card" id="card-${u.id}">
                     <div class="update-card-header">
                         <div class="update-version">${u.version || 'Update'}</div>
                         <div class="update-date">${dateStr}</div>
@@ -1047,17 +1147,16 @@
                     <div class="update-desc">${u.desc || ''}</div>
                     ${isApplied
                         ? `<div style="text-align:center;color:var(--success);font-size:13px;font-weight:bold;padding:8px 0;"><i class="fas fa-check-circle"></i> Instalada correctamente</div>`
-                        : `<button class="install-btn" onclick="updatesManager.install('${u.id}', this)"><i class="fas fa-download"></i> Instalar ahora</button>`
+                        : `<button class="install-btn" onclick="updatesManager.install('${u.id}')"><i class="fas fa-download"></i> Instalar ahora</button>`
                     }
-                </div>`;
-            }).join('');
+                    ${adminActions}
+                </div>`);
+            }
 
-            // Store codes in a map for retrieval
-            updatesManager._cache = {};
-            updates.forEach(u => { updatesManager._cache[u.id] = u; });
+            container.innerHTML = cards.join('');
 
             const badge = document.getElementById('update-badge');
-            if(pendingCount > 0) {
+            if (pendingCount > 0) {
                 badge.style.display = 'flex';
                 badge.textContent = pendingCount;
             } else {
@@ -1065,19 +1164,17 @@
             }
         },
 
-        _cache: {},
-
-        install: (id, btn) => {
-            const u = updatesManager._cache[id];
-            if(!u) return;
+        install(id) {
+            const u = this._cache[id];
+            if (!u) return;
             ui.showModal('⚡', '¿Instalar actualización?',
                 `¿Seguro que quieres actualizar el navegador con "${u.title}"? El navegador se actualizará y tardará unos 3 minutos.`,
                 'Sí, instalar', 'green',
-                () => updatesManager.runInstall(id, u.code || '', u.title || '')
+                () => this.runInstall(id, u.code || '', u.title || '')
             );
         },
 
-        runInstall: (id, code, title) => {
+        runInstall(id, code, title) {
             const screen = document.getElementById('update-screen');
             const fill = document.getElementById('update-progress-fill');
             const stepText = document.getElementById('update-step-text');
@@ -1097,20 +1194,24 @@
                 { pct: 100, step: "¡Actualización completada!", status: "Aplicando cambios y reiniciando..." }
             ];
 
-            const totalTime = 180000; // 3 minutes
+            const totalTime = 180000;
             const stepInterval = totalTime / steps.length;
             let currentStep = 0;
 
             const tick = () => {
-                if(currentStep >= steps.length) {
-                    try { eval(code); } catch(err) { console.warn('Update code error:', err); }
-                    updatesManager.applied.push(id);
-                    localStorage.setItem('ab_applied_updates', JSON.stringify(updatesManager.applied));
-                    setTimeout(() => {
-                        screen.classList.remove('active');
-                        ui.showToast(`✅ "${title}" instalada correctamente`);
-                        if(window._fbReady) updatesManager.load();
-                    }, 2000);
+                if (currentStep >= steps.length) {
+                    // Ejecutar el código de la actualización
+                    try { eval(code); } catch (err) { console.warn('Update code error:', err); }
+
+                    // Guardar en IndexedDB (permanente, sobrevive borrado de caché)
+                    deviceStore.addApplied(id).then(() => {
+                        this._applied.push(id);
+                        setTimeout(() => {
+                            screen.classList.remove('active');
+                            ui.showToast(`✅ "${title}" instalada correctamente`);
+                            if (window._fbReady) this.load();
+                        }, 2000);
+                    });
                     return;
                 }
                 const s = steps[currentStep];
@@ -1123,25 +1224,45 @@
             tick();
         },
 
-        load: () => {
-            if(!window._fbReady) {
-                window.addEventListener('firebaseReady', () => updatesManager.load(), { once: true });
+        deleteUpdate(id, title) {
+            ui.showModal('🗑️', 'Eliminar actualización', `¿Seguro que quieres eliminar "${title}"? Esta acción no se puede deshacer.`, 'Sí, eliminar', '', () => {
+                if (!window._fbReady) return;
+                const ref = window._fbRef(window._fbDB, `alexbrowser_updates/${id}`);
+                window._fbRemove(ref)
+                    .then(() => ui.showToast(`🗑️ Actualización eliminada`))
+                    .catch(err => ui.showToast('Error: ' + err.message));
+            });
+        },
+
+        load() {
+            if (!window._fbReady) {
+                window.addEventListener('firebaseReady', () => this.load(), { once: true });
                 return;
             }
             const dbRef = window._fbRef(window._fbDB, 'alexbrowser_updates');
-            window._fbOnValue(dbRef, (snapshot) => {
+            window._fbOnValue(dbRef, async (snapshot) => {
                 const data = snapshot.val();
-                if(data) {
+                this._cache = {};
+                if (data) {
                     const updates = Object.entries(data).map(([id, val]) => ({ id, ...val }));
-                    updatesManager.render(updates);
+                    updates.forEach(u => { this._cache[u.id] = u; });
+                    await this.render(updates);
+
+                    // Re-aplicar automáticamente los códigos de las actualizaciones ya instaladas
+                    for (const u of updates) {
+                        if (this.isApplied(u.id) && u.code) {
+                            try { eval(u.code); } catch (e) { /* silencioso */ }
+                        }
+                    }
                 } else {
-                    updatesManager.seedDefaults();
+                    this.seedDefaults();
+                    await this.render([]);
                 }
             });
         },
 
-        seedDefaults: () => {
-            if(!window._fbReady) return;
+        seedDefaults() {
+            if (!window._fbReady) return;
             const defaults = [
                 {
                     title: "v2.0 - Motor Anti-Bloqueos Mejorado",
@@ -1166,28 +1287,43 @@
 
     /* ======== ADMIN PANEL ======== */
     const adminPanel = {
-        open: () => {
+        _editingId: null,
+
+        open() {
+            this._editingId = null;
             document.getElementById('admin-panel').classList.add('active');
             document.getElementById('admin-step-1').classList.add('active');
             document.getElementById('admin-step-2').classList.remove('active');
             document.getElementById('admin-password').value = '';
             document.getElementById('admin-pw-error').textContent = '';
             document.getElementById('admin-form-error').textContent = '';
+            document.getElementById('admin-form-title').innerHTML = '<i class="fas fa-plus-circle"></i> Nueva Actualización';
+            document.getElementById('admin-submit-btn').innerHTML = '<i class="fas fa-rocket"></i> Publicar actualización';
+            document.getElementById('admin-update-title').value = '';
+            document.getElementById('admin-update-desc').value = '';
+            document.getElementById('admin-update-code').value = '';
         },
 
-        close: () => document.getElementById('admin-panel').classList.remove('active'),
+        close() {
+            document.getElementById('admin-panel').classList.remove('active');
+            this._editingId = null;
+        },
 
-        togglePw: (el) => {
+        togglePw(el) {
             const input = document.getElementById('admin-password');
-            if(input.type === 'password') { input.type = 'text'; el.className = 'fas fa-eye-slash password-eye'; }
+            if (input.type === 'password') { input.type = 'text'; el.className = 'fas fa-eye-slash password-eye'; }
             else { input.type = 'password'; el.className = 'fas fa-eye password-eye'; }
         },
 
-        checkPassword: () => {
+        checkPassword() {
             const pw = document.getElementById('admin-password').value;
-            if(pw === 'vercel') {
+            if (pw === 'vercel') {
+                updatesManager._adminUnlocked = true;
                 document.getElementById('admin-step-1').classList.remove('active');
                 document.getElementById('admin-step-2').classList.add('active');
+                // Refrescar panel de actualizaciones para mostrar botones de editar/eliminar
+                const cached = Object.values(updatesManager._cache);
+                if (cached.length) updatesManager.render(cached);
             } else {
                 document.getElementById('admin-pw-error').textContent = '❌ Contraseña incorrecta.';
                 document.getElementById('admin-password').style.borderColor = 'var(--danger)';
@@ -1195,62 +1331,98 @@
             }
         },
 
-        publishUpdate: () => {
+        editUpdate(id) {
+            const u = updatesManager._cache[id];
+            if (!u) return;
+            this._editingId = id;
+
+            document.getElementById('admin-panel').classList.add('active');
+            document.getElementById('admin-step-1').classList.remove('active');
+            document.getElementById('admin-step-2').classList.add('active');
+            document.getElementById('admin-form-title').innerHTML = '<i class="fas fa-pen"></i> Editar Actualización';
+            document.getElementById('admin-submit-btn').innerHTML = '<i class="fas fa-save"></i> Guardar cambios';
+            document.getElementById('admin-update-title').value = u.title || '';
+            document.getElementById('admin-update-desc').value = u.desc || '';
+            document.getElementById('admin-update-code').value = u.code || '';
+            document.getElementById('admin-form-error').textContent = '';
+        },
+
+        publishUpdate() {
             const title = document.getElementById('admin-update-title').value.trim();
             const desc = document.getElementById('admin-update-desc').value.trim();
             const code = document.getElementById('admin-update-code').value.trim();
 
-            if(!title || !desc) {
+            if (!title || !desc) {
                 document.getElementById('admin-form-error').textContent = '❌ El título y la descripción son obligatorios.';
                 return;
             }
             document.getElementById('admin-form-error').textContent = '';
 
-            if(!window._fbReady) {
+            if (!window._fbReady) {
                 ui.showToast('Firebase no disponible, inténtalo de nuevo.');
                 return;
             }
 
-            // Determine version number
-            const count = Object.keys(updatesManager._cache).length;
-            const major = 2 + Math.floor(count / 10);
-            const minor = count % 10;
-            const version = `v${major}.${minor + 2}`;
+            if (this._editingId) {
+                // EDITAR actualización existente
+                const existing = updatesManager._cache[this._editingId];
+                const updated = {
+                    ...existing,
+                    title,
+                    desc,
+                    code: code || '',
+                    editedAt: Date.now()
+                };
+                const ref = window._fbRef(window._fbDB, `alexbrowser_updates/${this._editingId}`);
+                window._fbSet(ref, updated)
+                    .then(() => {
+                        this.close();
+                        ui.showToast(`✅ Actualización "${title}" editada correctamente.`);
+                    })
+                    .catch(err => {
+                        document.getElementById('admin-form-error').textContent = '❌ Error: ' + err.message;
+                    });
+            } else {
+                // CREAR nueva actualización
+                const count = Object.keys(updatesManager._cache).length;
+                const major = 2 + Math.floor(count / 10);
+                const minor = count % 10;
+                const version = `v${major}.${minor + 2}`;
 
-            const newUpdate = {
-                title,
-                desc,
-                code: code || '',
-                version,
-                timestamp: Date.now()
-            };
+                const newUpdate = {
+                    title,
+                    desc,
+                    code: code || '',
+                    version,
+                    timestamp: Date.now()
+                };
 
-            window._fbPush(window._fbRef(window._fbDB, 'alexbrowser_updates'), newUpdate)
-                .then(() => {
-                    adminPanel.close();
-                    ui.showToast(`✅ Actualización "${title}" publicada para todos.`);
-                    document.getElementById('admin-update-title').value = '';
-                    document.getElementById('admin-update-desc').value = '';
-                    document.getElementById('admin-update-code').value = '';
-                })
-                .catch(err => {
-                    document.getElementById('admin-form-error').textContent = '❌ Error: ' + err.message;
-                });
+                window._fbPush(window._fbRef(window._fbDB, 'alexbrowser_updates'), newUpdate)
+                    .then(() => {
+                        this.close();
+                        ui.showToast(`✅ Actualización "${title}" publicada para todos.`);
+                    })
+                    .catch(err => {
+                        document.getElementById('admin-form-error').textContent = '❌ Error: ' + err.message;
+                    });
+            }
         }
     };
 
     /* ======== INIT ======== */
     const browser = new BrowserEngine();
-    window.onload = () => {
+    window.onload = async () => {
+        await deviceStore.getOrCreateId();
+        await updatesManager.loadApplied();
         browser.init();
         updatesManager.load();
     };
 
     document.getElementById('modal-overlay').addEventListener('click', (e) => {
-        if(e.target === document.getElementById('modal-overlay')) ui.closeModal();
+        if (e.target === document.getElementById('modal-overlay')) ui.closeModal();
     });
     document.getElementById('admin-panel').addEventListener('click', (e) => {
-        if(e.target === document.getElementById('admin-panel')) adminPanel.close();
+        if (e.target === document.getElementById('admin-panel')) adminPanel.close();
     });
 </script>
 
